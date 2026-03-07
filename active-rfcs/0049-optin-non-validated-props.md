@@ -7,7 +7,7 @@
 
 Introduce a runtime option `nonValidatedProps` that disables props filtering based on the `props` option declaration. When enabled (`true`), the runtime no longer distinguishes between `props` and `attrs` — all passed attributes are treated uniformly as props. This allows components (especially in JSX/Vapor) to accept props purely through TypeScript function signatures, without requiring a compile-time `props` option declaration.
 
-Additionally, a `propsVariance` option is introduced to control the type-level variance of props, defaulting to `'contravariant'` (to preserve fallthrough attrs behavior) with an optional `'invariant'` mode for stricter type checking.
+Additionally, a type-level `propsVariance` configuration is introduced via module augmentation to control the variance of component props types, defaulting to `'contravariant'` (to preserve fallthrough attrs behavior) with an optional `'invariant'` mode for stricter type checking. This is purely a compile-time concern with no runtime footprint.
 
 # Basic example
 
@@ -58,22 +58,33 @@ const MyComponent = defineVaporComponent((props: { title: string; count: number 
 
 ## Props variance control
 
-```tsx
+```ts
 // Default: contravariant (allows extra attrs to fall through)
+const app = createApp(App)
+app.config.nonValidatedProps = true
+// app.config.propsVariance is 'contravariant' by default
+```
+
+```tsx
 const MyComponent = defineVaporComponent((props: { title: string }) => {
   return <div>{props.title}</div>
 })
 
 // This is allowed - extra attrs fall through to the root element
 <MyComponent title="hello" class="extra" id="my-id" />
+```
 
+```ts
 // Strict mode: invariant (no extra attrs allowed at type level)
-const StrictComponent = defineVaporComponent(
-  (props: { title: string }) => {
-    return <div>{props.title}</div>
-  },
-  { propsVariance: 'invariant' }
-)
+const app = createApp(App)
+app.config.nonValidatedProps = true
+app.config.propsVariance = 'invariant'
+```
+
+```tsx
+const StrictComponent = defineVaporComponent((props: { title: string }) => {
+  return <div>{props.title}</div>
+})
 
 // Type error - 'class' is not in the declared props
 <StrictComponent title="hello" class="extra" /> // Type error!
@@ -197,11 +208,16 @@ This is a conscious trade-off. Components that rely on `$attrs` for attribute fo
 
 ### `propsVariance` option
 
+A new app-level configuration option that controls the type-level variance of component props:
+
 ```ts
-interface ComponentOptions {
-  propsVariance?: 'contravariant' | 'invariant' // default: 'contravariant'
+interface AppConfig {
+  // ... existing options
+  propsVariance: 'contravariant' | 'invariant' // default: 'contravariant'
 }
 ```
+
+This option is app-wide and affects all components within the application. It is only meaningful when `nonValidatedProps` is `true`.
 
 **`'contravariant'` (default):**
 
@@ -216,6 +232,8 @@ type ComponentProps<T> = T & Record<string, unknown>
 This means:
 
 ```tsx
+// app.config.propsVariance = 'contravariant' (default)
+
 const Comp = defineVaporComponent((props: { title: string }) => { /* ... */ })
 
 // All valid:
@@ -241,10 +259,9 @@ type ComponentProps<T> = T // no excess property allowance
 ```
 
 ```tsx
-const Comp = defineVaporComponent(
-  (props: { title: string }) => { /* ... */ },
-  { propsVariance: 'invariant' }
-)
+// app.config.propsVariance = 'invariant'
+
+const Comp = defineVaporComponent((props: { title: string }) => { /* ... */ })
 
 // Valid:
 <Comp title="hello" />
@@ -255,16 +272,28 @@ const Comp = defineVaporComponent(
 
 Note: `'invariant'` is a type-level-only constraint. At runtime, extra attributes are still received (since `nonValidatedProps` disables filtering) but are not used by the component. The type error serves as a development-time safeguard.
 
+Since `propsVariance` is an app-level setting, the type-level enforcement is achieved through module augmentation or a global type configuration (similar to how `vue-router` uses `declare module` to extend route types):
+
+```ts
+// env.d.ts or global type declaration
+declare module 'vue' {
+  interface AppConfigPropsVariance {
+    variance: 'invariant' // override the default 'contravariant'
+  }
+}
+```
+
+This allows the TypeScript compiler to apply the correct variance checking across all components in the project without per-component configuration.
+
 ### Type inference for `defineVaporComponent`
 
 ```ts
 function defineVaporComponent<P>(
   setup: (props: P) => VNode,
-  options?: { propsVariance?: 'contravariant' | 'invariant' }
 ): Component<P>
 ```
 
-The props type `P` is inferred directly from the `setup` function's parameter type. No additional type declaration is needed.
+The props type `P` is inferred directly from the `setup` function's parameter type. No additional type declaration is needed. The variance behavior is determined by the app-level `propsVariance` configuration (resolved at the type level via module augmentation).
 
 ## Compiler changes
 
