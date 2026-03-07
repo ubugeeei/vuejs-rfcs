@@ -58,11 +58,11 @@ const MyComponent = defineVaporComponent((props: { title: string; count: number 
 
 ## Props variance control
 
+Props variance is configured at the type level via module augmentation — no runtime setting is needed.
+
 ```ts
-// Default: contravariant (allows extra attrs to fall through)
-const app = createApp(App)
-app.config.nonValidatedProps = true
-// app.config.propsVariance is 'contravariant' by default
+// Default behavior (no configuration needed): contravariant
+// Extra attrs are allowed and fall through to the root element
 ```
 
 ```tsx
@@ -74,11 +74,15 @@ const MyComponent = defineVaporComponent((props: { title: string }) => {
 <MyComponent title="hello" class="extra" id="my-id" />
 ```
 
+To opt into strict (invariant) mode, add a type declaration:
+
 ```ts
-// Strict mode: invariant (no extra attrs allowed at type level)
-const app = createApp(App)
-app.config.nonValidatedProps = true
-app.config.propsVariance = 'invariant'
+// env.d.ts
+declare module 'vue' {
+  interface VuePropsConfig {
+    variance: 'invariant'
+  }
+}
 ```
 
 ```tsx
@@ -206,20 +210,23 @@ This is a conscious trade-off. Components that rely on `$attrs` for attribute fo
 
 ## Type system design
 
-### `propsVariance` option
+### `propsVariance` — type-level configuration
 
-A new app-level configuration option that controls the type-level variance of component props:
+`propsVariance` is a purely type-level concern with no runtime representation. It controls how the TypeScript compiler checks extra attributes passed to components. Configuration is done via module augmentation, following the same pattern as `vue-router`'s typed routes:
 
 ```ts
-interface AppConfig {
-  // ... existing options
-  propsVariance: 'contravariant' | 'invariant' // default: 'contravariant'
+// Vue's type definition (in vue/types)
+interface VuePropsConfig {
+  // Users override this interface to change the default
+  // variance: 'contravariant' | 'invariant'
 }
+
+type PropsVariance = VuePropsConfig extends { variance: infer V }
+  ? V
+  : 'contravariant' // default
 ```
 
-This option is app-wide and affects all components within the application. It is only meaningful when `nonValidatedProps` is `true`.
-
-**`'contravariant'` (default):**
+**`'contravariant'` (default — no configuration needed):**
 
 The component accepts any superset of the declared props type. Extra attributes are allowed and handled by the runtime (fallthrough to root element, or ignored).
 
@@ -232,8 +239,6 @@ type ComponentProps<T> = T & Record<string, unknown>
 This means:
 
 ```tsx
-// app.config.propsVariance = 'contravariant' (default)
-
 const Comp = defineVaporComponent((props: { title: string }) => { /* ... */ })
 
 // All valid:
@@ -250,6 +255,17 @@ const Comp = defineVaporComponent((props: { title: string }) => { /* ... */ })
 
 **`'invariant'`:**
 
+Opt in via module augmentation:
+
+```ts
+// env.d.ts
+declare module 'vue' {
+  interface VuePropsConfig {
+    variance: 'invariant'
+  }
+}
+```
+
 The component accepts only the exact declared props type. Extra attributes cause a type error.
 
 Type-level behavior:
@@ -259,8 +275,6 @@ type ComponentProps<T> = T // no excess property allowance
 ```
 
 ```tsx
-// app.config.propsVariance = 'invariant'
-
 const Comp = defineVaporComponent((props: { title: string }) => { /* ... */ })
 
 // Valid:
@@ -272,19 +286,6 @@ const Comp = defineVaporComponent((props: { title: string }) => { /* ... */ })
 
 Note: `'invariant'` is a type-level-only constraint. At runtime, extra attributes are still received (since `nonValidatedProps` disables filtering) but are not used by the component. The type error serves as a development-time safeguard.
 
-Since `propsVariance` is an app-level setting, the type-level enforcement is achieved through module augmentation or a global type configuration (similar to how `vue-router` uses `declare module` to extend route types):
-
-```ts
-// env.d.ts or global type declaration
-declare module 'vue' {
-  interface AppConfigPropsVariance {
-    variance: 'invariant' // override the default 'contravariant'
-  }
-}
-```
-
-This allows the TypeScript compiler to apply the correct variance checking across all components in the project without per-component configuration.
-
 ### Type inference for `defineVaporComponent`
 
 ```ts
@@ -293,7 +294,7 @@ function defineVaporComponent<P>(
 ): Component<P>
 ```
 
-The props type `P` is inferred directly from the `setup` function's parameter type. No additional type declaration is needed. The variance behavior is determined by the app-level `propsVariance` configuration (resolved at the type level via module augmentation).
+The props type `P` is inferred directly from the `setup` function's parameter type. No additional type declaration is needed. The variance behavior is determined by the project-wide `VuePropsConfig` interface (resolved at the type level via module augmentation).
 
 ## Compiler changes
 
@@ -393,10 +394,10 @@ This avoids changing existing behavior but fragments the component model further
 - **Migration guide.** Provide documentation on:
   - How to migrate from `props` option to TypeScript-only props.
   - How to replace `$attrs` usage with `$props`.
-  - When to use `propsVariance: 'invariant'` vs. the default `'contravariant'`.
+  - When to configure `VuePropsConfig` with `'invariant'` vs. the default `'contravariant'`.
 - **Tooling updates.** Volar and eslint-plugin-vue need to support the `nonValidatedProps` mode:
   - Skip props validation diagnostics when `nonValidatedProps` is `true`.
-  - Support `propsVariance` for JSX type checking.
+  - Support `VuePropsConfig` module augmentation for JSX type checking.
 - **Codemod.** A codemod can be provided to:
   - Add `nonValidatedProps: true` to component options.
   - Replace `$attrs` with `$props`.
@@ -409,5 +410,5 @@ This avoids changing existing behavior but fragments the component model further
 3. **Attrs forwarding pattern:** With `nonValidatedProps: true`, what is the recommended pattern for attribute forwarding in wrapper components? Should a new utility (e.g., `splitProps()`) be provided to separate "own" props from "forwarded" props?
 4. **Runtime validation opt-in:** For developers who want both `nonValidatedProps: true` (no filtering) and runtime validation, should there be a way to add validation back (e.g., via a `validate` option or a `withValidation()` wrapper)?
 5. **Interaction with `defineModel`:** How does `defineModel` behave when `nonValidatedProps` is `true`? The `modelValue` prop is implicitly declared — should it still be special-cased?
-6. **Variance naming:** Is `propsVariance` with `'contravariant'` / `'invariant'` too academic? Alternatives like `propsMode: 'open' | 'strict'` or `strictProps: boolean` might be more approachable.
+6. **Variance naming:** Is `VuePropsConfig` with `'contravariant'` / `'invariant'` too academic? Alternatives like `'open' | 'strict'` or a simple `strictProps: boolean` interface might be more approachable.
 7. **Partial opt-in:** Should there be a way to mark only specific props as "validated" while leaving the rest unfiltered? This would allow a middle ground between full validation and no validation.
